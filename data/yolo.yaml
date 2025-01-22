@@ -1,0 +1,16 @@
+description: Ultralytics YOLOv8n-cls model trained on ../.data/animal
+author: Ultralytics
+date: '2024-12-27T02:46:50.963683'
+version: 8.3.53
+license: AGPL-3.0 License (https://ultralytics.com/license)
+docs: https://docs.ultralytics.com
+stride: 1
+task: classify
+batch: 1
+imgsz:
+- 224
+- 224
+names:
+  0: animal
+  1: non-animal
+nc: 2
