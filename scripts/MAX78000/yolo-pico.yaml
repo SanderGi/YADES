@@ -1,0 +1,185 @@
+arch: yolo_pico
+dataset: animal_detection
+
+layers:
+  # ------------ Layer 0: Conv2dSimulatedStride2 ------------
+  - op: conv2d
+    kernel_size: 3x3
+    pad: 1
+    activate: ReLU
+    out_offset: 0x0000
+    processors: 0x000000000000ffff
+    data_format: HWC
+    max_pool: 2
+    pool_stride: 2
+
+  # ------------ Layer 1: Conv2dSimulatedStride2 ------------
+  - op: conv2d
+    kernel_size: 3x3
+    pad: 1
+    activate: ReLU
+    out_offset: 0x2000
+    processors: 0x000000000000ffff
+    max_pool: 2
+    pool_stride: 2
+
+  # ------------ Layer 2: C2f (Composed Layer) ------------
+  - op: conv2d
+    kernel_size: 1x1
+    pad: 0
+    activate: ReLU
+    out_offset: 0x0000
+    processors: 0x000000000000ffff
+    name: c2f1_start
+  - op: conv2d
+    kernel_size: 1x1
+    pad: 0
+    activate: ReLU
+    out_offset: 0x2000
+    processors: 0x000000000000ffff
+    name: c2f1_bottleneck_1
+  - op: conv2d
+    kernel_size: 3x3
+    pad: 1
+    activate: ReLU
+    out_offset: 0x4000
+    processors: 0x000000000000ffff
+    eltwise: add
+    name: c2f1_bottleneck_2
+  - op: conv2d
+    kernel_size: 3x3
+    pad: 1
+    activate: ReLU
+    out_offset: 0x0000
+    processors: 0x000000000000ffff
+    name: c2f1_end
+
+  # ------------ Layer 3: Conv2dSimulatedStride2 ------------
+  - op: conv2d
+    kernel_size: 3x3
+    pad: 1
+    activate: ReLU
+    out_offset: 0x2000
+    processors: 0x000000000000ffff
+    max_pool: 2
+    pool_stride: 2
+
+  # ------------ Layer 4: C2f (Composed Layer) ------------
+  - op: conv2d
+    kernel_size: 1x1
+    pad: 0
+    activate: ReLU
+    out_offset: 0x0000
+    processors: 0x000000000000ffff
+    name: c2f2_start
+  - op: conv2d
+    kernel_size: 1x1
+    pad: 0
+    activate: ReLU
+    out_offset: 0x2000
+    processors: 0x000000000000ffff
+    name: c2f2_bottleneck_1
+  - op: conv2d
+    kernel_size: 3x3
+    pad: 1
+    activate: ReLU
+    out_offset: 0x4000
+    processors: 0x000000000000ffff
+    eltwise: add
+    name: c2f2_bottleneck_2
+  - op: conv2d
+    kernel_size: 3x3
+    pad: 1
+    activate: ReLU
+    out_offset: 0x0000
+    processors: 0x000000000000ffff
+    name: c2f2_end
+
+  # ------------ Layer 5: Conv2dSimulatedStride2 ------------
+  - op: conv2d
+    kernel_size: 3x3
+    pad: 1
+    activate: ReLU
+    out_offset: 0x2000
+    processors: 0x000000000000ffff
+    max_pool: 2
+    pool_stride: 2
+
+  # ------------ Layer 6: C2f (Composed Layer) ------------
+  - op: conv2d
+    kernel_size: 1x1
+    pad: 0
+    activate: ReLU
+    out_offset: 0x0000
+    processors: 0x000000000000ffff
+    name: c2f3_start
+  - op: conv2d
+    kernel_size: 1x1
+    pad: 0
+    activate: ReLU
+    out_offset: 0x2000
+    processors: 0x000000000000ffff
+    name: c2f3_bottleneck_1
+  - op: conv2d
+    kernel_size: 3x3
+    pad: 1
+    activate: ReLU
+    out_offset: 0x4000
+    processors: 0x000000000000ffff
+    eltwise: add
+    name: c2f3_bottleneck_2
+  - op: conv2d
+    kernel_size: 3x3
+    pad: 1
+    activate: ReLU
+    out_offset: 0x0000
+    processors: 0x000000000000ffff
+    name: c2f3_end
+
+  # ------------ Layer 7: Conv2dSimulatedStride2 ------------
+  - op: conv2d
+    kernel_size: 3x3
+    pad: 1
+    activate: ReLU
+    out_offset: 0x2000
+    processors: 0x000000000000ffff
+    max_pool: 2
+    pool_stride: 2
+
+  # ------------ Layer 8: C2f (Composed Layer) ------------
+  - op: conv2d
+    kernel_size: 1x1
+    pad: 0
+    activate: ReLU
+    out_offset: 0x0000
+    processors: 0x000000000000ffff
+    name: c2f4_start
+  - op: conv2d
+    kernel_size: 1x1
+    pad: 0
+    activate: ReLU
+    out_offset: 0x2000
+    processors: 0x000000000000ffff
+    name: c2f4_bottleneck_1
+  - op: conv2d
+    kernel_size: 3x3
+    pad: 1
+    activate: ReLU
+    out_offset: 0x4000
+    processors: 0x000000000000ffff
+    eltwise: add
+    name: c2f4_bottleneck_2
+  - op: conv2d
+    kernel_size: 3x3
+    pad: 1
+    activate: ReLU
+    out_offset: 0x0000
+    processors: 0x000000000000ffff
+    name: c2f4_end
+
+  # ------------ Layer 9: Classify ------------
+  - op: mlp
+    flatten: true
+    out_offset: 0x2000
+    processors: 0x000000000000ffff
+    output_width: 32
