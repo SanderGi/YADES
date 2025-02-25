@@ -190,7 +190,7 @@ Unlike Post Training Quantization (PTQ) that quantizes a pre-trained model witho
 ![YOLOv8n-cls architecture diagram](data/YOLOv8n-cls.svg)
 
 ### About YOLOv8p
-The smallest officially available YOLOv8 checkpoint is "nano" (see [YOLOv8n](#about-yolov8n-cls)) which is 5.8 MB. We can scale down the layers and channels to fit within the 442 KB limit of the MAX78000. I have named this YOLOv8p for "pico" and the architecture can be found in [models/yolo_pico.py](models/yolo_pico.py).
+The smallest officially available YOLOv8 checkpoint is "nano" (see [YOLOv8n](#about-yolov8n-cls)) which is 5.8 MB. We can scale down the layers and channels to fit within the 442 KB limit of the MAX78000. I have named this YOLOv8p for "pico" and the architecture can be found in [scripts/yolo_pico.py](scripts/yolo_pico.py).
 
 ## References
 
