@@ -1,0 +1,42 @@
+# Extreme example showing almost all weight memory utilized and all 32 layers (maximum on MAX78000)
+# Uses 417,834 of 442,000 available weight memory bytes (94.5%) 
+
+# Model Parameters
+num_input_channels: 3
+input_width: 1
+input_height: 1
+num_output_classes: 70
+
+# Layer Definitions
+# format: output_channels kernel_size padding [pool_size pool_stride]
+64 1 0
+64 1 0
+64 1 0
+64 1 0
+64 1 0
+64 1 0
+64 1 0
+64 1 0
+64 1 0
+64 1 0
+64 1 0
+64 1 0
+64 1 0
+64 1 0
+64 1 0
+64 1 0
+64 1 0
+64 1 0
+64 1 0
+64 1 0
+64 1 0
+64 3 1
+64 3 1
+64 3 1
+64 3 1
+64 3 1
+64 3 1
+64 3 1
+64 3 1
+64 3 1
+6 3 1

@@ -1,0 +1,1414 @@
+============================ Prompt 1 ============================
+Please write the full (ready to run) model code and yaml specification to run YOLOv8 on the MAX78000 for elk detection. You do not need to preserve the part of the C2f that splits the input into chunks.
+YOLOv8n architecture (will need to be modified to use ai8x operations supported by the MAX78000 and made smaller to fit within the size limits of the MAX78000):
+<!-- #region -->
+import torch
+from torch import nn
+
+
+def autopad(kernel_size):
+    return (
+        kernel_size // 2
+        if isinstance(kernel_size, int)
+        else tuple(x // 2 for x in kernel_size)
+    )
+
+
+class Conv(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride):
+        super().__init__()
+        self.conv = nn.Conv2d(
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride,
+            padding=autopad(kernel_size),
+            bias=False,
+        )
+        self.bn = nn.BatchNorm2d(
+            out_channels, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True
+        )
+        self.act = nn.SiLU(inplace=True)
+
+    def forward(self, x):
+        return self.act(self.bn(self.conv(x)))
+
+
+class Bottleneck(nn.Module):
+    def __init__(self, channels, add):
+        super().__init__()
+        self.cv1 = Conv(
+            in_channels=channels,
+            out_channels=channels,
+            kernel_size=(3, 3),
+            stride=(1, 1),
+        )
+        self.cv2 = Conv(
+            in_channels=channels,
+            out_channels=channels,
+            kernel_size=(3, 3),
+            stride=(1, 1),
+        )
+        self.add = add
+
+    def forward(self, x):
+        if not self.add:
+            return self.cv2(self.cv1(x))
+        return torch.add(x, self.cv2(self.cv1(x)))
+
+
+class C2f(nn.Module):
+    def __init__(self, channels, num_bottlenecks, bottleneck_channels):
+        super().__init__()
+        self.cv1 = Conv(
+            in_channels=channels,
+            out_channels=channels,
+            kernel_size=(1, 1),
+            stride=(1, 1),
+        )
+        self.cv2 = Conv(
+            in_channels=channels + bottleneck_channels * num_bottlenecks,
+            out_channels=channels,
+            kernel_size=(1, 1),
+            stride=(1, 1),
+        )
+        self.m = nn.ModuleList(
+            [
+                Bottleneck(channels=bottleneck_channels, add=True)
+                for _ in range(num_bottlenecks)
+            ]
+        )
+
+    def forward(self, x):
+        y = list(self.cv1(x).chunk(2, 1))
+        y.extend(m(y[-1]) for m in self.m)
+        return self.cv2(torch.cat(y, 1))
+
+
+class Classify(nn.Module):
+    def __init__(self, in_channels, hidden_channels, num_classes):
+        super().__init__()
+        self.conv = Conv(
+            in_channels, out_channels=hidden_channels, kernel_size=(1, 1), stride=(1, 1)
+        )
+        self.pool = nn.AdaptiveAvgPool2d(output_size=1)
+        self.drop = nn.Dropout(p=0.0, inplace=True)
+        self.linear = nn.Linear(
+            in_features=hidden_channels, out_features=num_classes, bias=True
+        )
+
+    def forward(self, x):
+        if isinstance(x, list):
+            x = torch.cat(x, 1)
+        x = self.linear(self.drop(self.pool(self.conv(x)).flatten(1)))
+        if self.training:
+            return x
+        return x.softmax(1)
+
+
+class YOLOMinimal(nn.Module):
+    def __init__(self, classes):
+        super().__init__()
+        self.classes = classes
+        self.model = nn.Sequential(
+            Conv(in_channels=3, out_channels=16, kernel_size=(3, 3), stride=(2, 2)),
+            Conv(in_channels=16, out_channels=32, kernel_size=(3, 3), stride=(2, 2)),
+            C2f(channels=32, num_bottlenecks=1, bottleneck_channels=16),
+            Conv(in_channels=32, out_channels=64, kernel_size=(3, 3), stride=(2, 2)),
+            C2f(channels=64, num_bottlenecks=2, bottleneck_channels=32),
+            Conv(in_channels=64, out_channels=128, kernel_size=(3, 3), stride=(2, 2)),
+            C2f(channels=128, num_bottlenecks=2, bottleneck_channels=64),
+            Conv(in_channels=128, out_channels=256, kernel_size=(3, 3), stride=(2, 2)),
+            C2f(channels=256, num_bottlenecks=1, bottleneck_channels=128),
+            Classify(in_channels=256, hidden_channels=1280, num_classes=len(classes)),
+        )
+
+    @classmethod
+    def load(cls, path):
+        state_dict = torch.load(path, weights_only=True)
+        classes = state_dict.pop("classes")
+        m = cls(classes)
+        m.load_state_dict(state_dict)
+        return m
+
+    @classmethod
+    def from_YOLOv8n(cls, yolo):
+        """Create a YOLOMinimal model from an Ultralytics YOLOv8n-cls model."""
+        num_classes = yolo.model.model[-1].linear.out_features
+        classes = [yolo.names[i] for i in range(num_classes)]
+        m = cls(classes)
+        m.load_state_dict(yolo.model.state_dict())
+        return m
+
+    def save(self, path):
+        from copy import deepcopy
+
+        half = deepcopy(self).half()
+        torch.save({"classes": self.classes, **half.state_dict()}, path)
+
+    def forward(self, x):
+        return self.model(x)
+
+    def predict(self, x):
+        return self.classes[self.forward(x).argmax(1)]
+
+#Example inference code
+if __name__ == "__main__":
+    import cv2
+    import torchvision.transforms as transforms
+    from ultralytics import YOLO
+
+    mm = YOLOMinimal.from_YOLOv8n(
+        YOLO("./data/yolo-finetune/10_epoch_224_imgsz/weights/best.pt")
+    )
+    mm.eval()
+
+    IMG_SIZE = 224
+    transform = transforms.Compose(
+        [
+            transforms.ToTensor(),
+            transforms.Resize((IMG_SIZE, IMG_SIZE)),
+        ]
+    )
+    image = cv2.imread("./data/sample.jpg")
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    image = transform(image)
+#Add batch dimension
+    image = image.unsqueeze(0)  # type: ignore
+
+    print(mm.predict(image))
+<!-- #endregion -->
+
+============================ Output 1 ============================
+<!-- #region -->
+######################################################################
+#YOLOv8 - Elk - MAX78000 Compatible Tiny Classifier
+#
+#Author : OpenAI ChatGPT(GPT - 5)
+#Compatible with Maxim Integrated AI8X / MAX78000 SDK
+######################################################################
+
+import torch
+import torch.nn as nn
+import ai8x  # MAX78000 AI library
+
+#-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -
+#Basic building blocks
+#-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -
+class Conv(nn.Module):
+    def __init__(self, in_ch, out_ch, kernel_size=3, stride=1, pad=None):
+        super().__init__()
+        if pad is None:
+            pad = kernel_size // 2
+        self.conv = ai8x.FusedConv2dBNReLU(
+            in_ch, out_ch, kernel_size=kernel_size, stride=stride, padding=pad,
+            bias=False, batchnorm=True, relu=True
+        )
+
+    def forward(self, x):
+        return self.conv(x)
+
+
+class Bottleneck(nn.Module):
+    def __init__(self, ch):
+        super().__init__()
+        self.conv1 = Conv(ch, ch, 3, 1)
+        self.conv2 = Conv(ch, ch, 3, 1)
+
+    def forward(self, x):
+        return x + self.conv2(self.conv1(x))
+
+
+class C2f(nn.Module):
+    def __init__(self, ch, n):
+        super().__init__()
+#No chunking – just sequential bottlenecks
+        self.convs = nn.Sequential(*[Bottleneck(ch) for _ in range(n)])
+
+    def forward(self, x):
+        return self.convs(x)
+
+#-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -
+#YOLOv8 - Tiny for MAX78000
+#-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -
+class YOLOv8ElkMax78000(nn.Module):
+    def __init__(self, num_classes=1):
+        super().__init__()
+
+        self.features = nn.Sequential(
+            Conv(3, 16, 3, 2),      # 112x112
+            Conv(16, 32, 3, 2),     # 56x56
+            C2f(32, 1),
+            Conv(32, 64, 3, 2),     # 28x28
+            C2f(64, 1),
+            Conv(64, 128, 3, 2),    # 14x14
+            C2f(128, 1),
+            Conv(128, 256, 3, 2),   # 7x7
+        )
+
+        self.pool = nn.AvgPool2d(7)
+        self.fc = ai8x.Linear(256, num_classes, wide=True)
+
+    def forward(self, x):
+        x = self.features(x)
+        x = self.pool(x)
+        x = torch.flatten(x, 1)
+        x = self.fc(x)
+        return x
+
+#-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -
+#Example inference(CPU simulation)
+#-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -
+if __name__ == "__main__":
+    m = YOLOv8ElkMax78000(num_classes=1)
+    m.eval()
+    x = torch.randn(1, 3, 224, 224)
+    y = m(x)
+    print("Output logits:", y)
+    print("Predicted:", torch.sigmoid(y))
+
+---
+arch: "yolov8_elk_max78000"
+dataset: "elk"
+inputs: 1
+input_channels: 3
+input_width: 224
+input_height: 224
+output_channels: 1
+output_width: 1
+output_height: 1
+weight_bits: 8
+bias_bits: 8
+activation_bits: 8
+# layers
+layers:
+  - layer: ai8x.FusedConv2dBNReLU
+    in_channels: 3
+    out_channels: 16
+    kernel_size: 3
+    stride: 2
+    padding: 1
+
+  - layer: ai8x.FusedConv2dBNReLU
+    in_channels: 16
+    out_channels: 32
+    kernel_size: 3
+    stride: 2
+    padding: 1
+
+  - layer: ai8x.FusedConv2dBNReLU
+    in_channels: 32
+    out_channels: 32
+    kernel_size: 3
+    stride: 1
+    padding: 1
+
+  - layer: ai8x.FusedConv2dBNReLU
+    in_channels: 32
+    out_channels: 64
+    kernel_size: 3
+    stride: 2
+    padding: 1
+
+  - layer: ai8x.FusedConv2dBNReLU
+    in_channels: 64
+    out_channels: 64
+    kernel_size: 3
+    stride: 1
+    padding: 1
+
+  - layer: ai8x.FusedConv2dBNReLU
+    in_channels: 64
+    out_channels: 128
+    kernel_size: 3
+    stride: 2
+    padding: 1
+
+  - layer: ai8x.FusedConv2dBNReLU
+    in_channels: 128
+    out_channels: 128
+    kernel_size: 3
+    stride: 1
+    padding: 1
+
+  - layer: ai8x.FusedConv2dBNReLU
+    in_channels: 128
+    out_channels: 256
+    kernel_size: 3
+    stride: 2
+    padding: 1
+
+  - layer: ai8x.AvgPool2d
+    kernel_size: 7
+    stride: 1
+
+  - layer: ai8x.Linear
+    in_features: 256
+    out_features: 1
+    wide: true
+...
+<!-- #endregion -->
+Notes: this is close, but the yaml is completely missing processor and memory allocations
+
+============================ Prompt 2 ============================
+Please write the full (ready to run) model code and yaml specification to run YOLOv8 on the MAX78000 for animal detection. You do not need to preserve the part of the C2f that splits the input into chunks.
+YOLOv8n architecture (will need to be modified to use ai8x operations supported by the MAX78000 and made smaller to fit within the size limits of the MAX78000):
+<!-- #region -->
+import torch
+from torch import nn
+
+
+def autopad(kernel_size):
+    return (
+        kernel_size // 2
+        if isinstance(kernel_size, int)
+        else tuple(x // 2 for x in kernel_size)
+    )
+
+
+class Conv(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride):
+        super().__init__()
+        self.conv = nn.Conv2d(
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride,
+            padding=autopad(kernel_size),
+            bias=False,
+        )
+        self.bn = nn.BatchNorm2d(
+            out_channels, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True
+        )
+        self.act = nn.SiLU(inplace=True)
+
+    def forward(self, x):
+        return self.act(self.bn(self.conv(x)))
+
+
+class Bottleneck(nn.Module):
+    def __init__(self, channels, add):
+        super().__init__()
+        self.cv1 = Conv(
+            in_channels=channels,
+            out_channels=channels,
+            kernel_size=(3, 3),
+            stride=(1, 1),
+        )
+        self.cv2 = Conv(
+            in_channels=channels,
+            out_channels=channels,
+            kernel_size=(3, 3),
+            stride=(1, 1),
+        )
+        self.add = add
+
+    def forward(self, x):
+        if not self.add:
+            return self.cv2(self.cv1(x))
+        return torch.add(x, self.cv2(self.cv1(x)))
+
+
+class C2f(nn.Module):
+    def __init__(self, channels, num_bottlenecks, bottleneck_channels):
+        super().__init__()
+        self.cv1 = Conv(
+            in_channels=channels,
+            out_channels=channels,
+            kernel_size=(1, 1),
+            stride=(1, 1),
+        )
+        self.cv2 = Conv(
+            in_channels=channels + bottleneck_channels * num_bottlenecks,
+            out_channels=channels,
+            kernel_size=(1, 1),
+            stride=(1, 1),
+        )
+        self.m = nn.ModuleList(
+            [
+                Bottleneck(channels=bottleneck_channels, add=True)
+                for _ in range(num_bottlenecks)
+            ]
+        )
+
+    def forward(self, x):
+        y = list(self.cv1(x).chunk(2, 1))
+        y.extend(m(y[-1]) for m in self.m)
+        return self.cv2(torch.cat(y, 1))
+
+
+class Classify(nn.Module):
+    def __init__(self, in_channels, hidden_channels, num_classes):
+        super().__init__()
+        self.conv = Conv(
+            in_channels, out_channels=hidden_channels, kernel_size=(1, 1), stride=(1, 1)
+        )
+        self.pool = nn.AdaptiveAvgPool2d(output_size=1)
+        self.drop = nn.Dropout(p=0.0, inplace=True)
+        self.linear = nn.Linear(
+            in_features=hidden_channels, out_features=num_classes, bias=True
+        )
+
+    def forward(self, x):
+        if isinstance(x, list):
+            x = torch.cat(x, 1)
+        x = self.linear(self.drop(self.pool(self.conv(x)).flatten(1)))
+        if self.training:
+            return x
+        return x.softmax(1)
+
+
+class YOLOMinimal(nn.Module):
+    def __init__(self, classes):
+        super().__init__()
+        self.classes = classes
+        self.model = nn.Sequential(
+            Conv(in_channels=3, out_channels=16, kernel_size=(3, 3), stride=(2, 2)),
+            Conv(in_channels=16, out_channels=32, kernel_size=(3, 3), stride=(2, 2)),
+            C2f(channels=32, num_bottlenecks=1, bottleneck_channels=16),
+            Conv(in_channels=32, out_channels=64, kernel_size=(3, 3), stride=(2, 2)),
+            C2f(channels=64, num_bottlenecks=2, bottleneck_channels=32),
+            Conv(in_channels=64, out_channels=128, kernel_size=(3, 3), stride=(2, 2)),
+            C2f(channels=128, num_bottlenecks=2, bottleneck_channels=64),
+            Conv(in_channels=128, out_channels=256, kernel_size=(3, 3), stride=(2, 2)),
+            C2f(channels=256, num_bottlenecks=1, bottleneck_channels=128),
+            Classify(in_channels=256, hidden_channels=1280, num_classes=len(classes)),
+        )
+
+    @classmethod
+    def load(cls, path):
+        state_dict = torch.load(path, weights_only=True)
+        classes = state_dict.pop("classes")
+        m = cls(classes)
+        m.load_state_dict(state_dict)
+        return m
+
+    @classmethod
+    def from_YOLOv8n(cls, yolo):
+        """Create a YOLOMinimal model from an Ultralytics YOLOv8n-cls model."""
+        num_classes = yolo.model.model[-1].linear.out_features
+        classes = [yolo.names[i] for i in range(num_classes)]
+        m = cls(classes)
+        m.load_state_dict(yolo.model.state_dict())
+        return m
+
+    def save(self, path):
+        from copy import deepcopy
+
+        half = deepcopy(self).half()
+        torch.save({"classes": self.classes, **half.state_dict()}, path)
+
+    def forward(self, x):
+        return self.model(x)
+
+    def predict(self, x):
+        return self.classes[self.forward(x).argmax(1)]
+
+#Example inference code
+if __name__ == "__main__":
+    import cv2
+    import torchvision.transforms as transforms
+    from ultralytics import YOLO
+
+    mm = YOLOMinimal.from_YOLOv8n(
+        YOLO("./data/yolo-finetune/10_epoch_224_imgsz/weights/best.pt")
+    )
+    mm.eval()
+
+    IMG_SIZE = 224
+    transform = transforms.Compose(
+        [
+            transforms.ToTensor(),
+            transforms.Resize((IMG_SIZE, IMG_SIZE)),
+        ]
+    )
+    image = cv2.imread("./data/sample.jpg")
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    image = transform(image)
+#Add batch dimension
+    image = image.unsqueeze(0)  # type: ignore
+
+    print(mm.predict(image))
+<!-- #endregion -->
+
+============================ Output 2 ============================
+<!-- #region -->
+#!/usr/bin/env python3
+"""
+yolo_max78000_tiny.py
+
+Tiny single-scale YOLO-style model suitable as a starting point for conversion to
+MAX78000 using the ai8x toolchain.
+
+Usage:
+    python yolo_max78000_tiny.py           # runs a dummy inference and exports ONNX
+"""
+
+import torch
+from torch import nn
+import torch.nn.functional as F
+import argparse
+import os
+
+# ---------------------------
+# Config (edit if you want)
+# ---------------------------
+IMG_SIZE = 224
+GRID_SIZE = 7               # produce GRID_SIZE x GRID_SIZE predictions
+NUM_ANCHORS = 3             # anchors per grid cell
+NUM_CLASSES = 1             # 'animal' as single class
+CLASS_NAMES = ["animal"]
+ONNX_PATH = "yolo_max78000_tiny.onnx"
+DEVICE = "cpu"
+
+# ---------------------------
+# Utility layers
+# ---------------------------
+def autopad(k):
+    return k // 2 if isinstance(k, int) else tuple(x // 2 for x in k)
+
+
+class ConvBNAct(nn.Module):
+    """Convenience conv -> bn -> SiLU (SiLU chosen to match small YOLO nets).
+       Note: ai8x toolchain may require replacing SiLU with ReLU or a LUT-friendly activation.
+    """
+
+    def __init__(self, in_ch, out_ch, k=3, s=1):
+        super().__init__()
+        self.conv = nn.Conv2d(in_ch, out_ch, kernel_size=k, stride=s, padding=autopad(k), bias=False)
+        self.bn = nn.BatchNorm2d(out_ch, eps=1e-5, momentum=0.1)
+        self.act = nn.SiLU(inplace=True)
+
+    def forward(self, x):
+        return self.act(self.bn(self.conv(x)))
+
+
+class TinyYOLOHead(nn.Module):
+    """
+    Single-scale detection head.
+    Output tensor shape:
+      (B, NUM_ANCHORS * (5 + NUM_CLASSES), GRID_SIZE, GRID_SIZE)
+    where 5 = (tx, ty, tw, th, objectness)
+    """
+
+    def __init__(self, in_channels, grid_size=7, num_anchors=3, num_classes=1):
+        super().__init__()
+        self.grid_size = grid_size
+        self.num_anchors = num_anchors
+        self.num_classes = num_classes
+        out_ch = num_anchors * (5 + num_classes)
+        # small conv tower
+        self.conv1 = ConvBNAct(in_channels, in_channels // 2, k=1)
+        self.conv2 = ConvBNAct(in_channels // 2, in_channels // 2, k=3)
+        self.conv3 = nn.Conv2d(in_channels // 2, out_ch, kernel_size=1, stride=1, padding=0, bias=True)
+
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.conv2(x)
+        x = self.conv3(x)
+        # no activation here: raw predictions
+        return x
+
+
+class TinyYOLONet(nn.Module):
+    """
+    Minimal YOLO-like network. Designed to be small for MAX78000.
+    Input: (B,3, IMG_SIZE, IMG_SIZE)
+    """
+
+    def __init__(self, classes=CLASS_NAMES, img_size=IMG_SIZE, grid_size=GRID_SIZE, anchors=NUM_ANCHORS):
+        super().__init__()
+        self.classes = classes
+        self.num_classes = len(classes)
+        self.img_size = img_size
+        self.grid_size = grid_size
+
+        # backbone - extremely small
+        self.stem = nn.Sequential(
+            ConvBNAct(3, 16, k=3, s=2),   # 112x112
+            ConvBNAct(16, 24, k=3, s=2),  # 56x56
+            ConvBNAct(24, 32, k=3, s=2),  # 28x28
+            ConvBNAct(32, 64, k=3, s=2),  # 14x14
+            ConvBNAct(64, 128, k=3, s=2), # 7x7
+        )
+
+        # detection head operates at 7x7
+        self.head = TinyYOLOHead(in_channels=128, grid_size=self.grid_size,
+                                 num_anchors=anchors, num_classes=self.num_classes)
+
+        # initialize anchors (puppet anchors; tune for your dataset)
+        # these are relative to the input image (width,height) in pixels
+        self.anchors = torch.tensor([
+            [20.0, 20.0],
+            [40.0, 40.0],
+            [80.0, 80.0],
+        ])  # shape (NUM_ANCHORS, 2)
+
+    def forward(self, x):
+        # return raw predictions shaped (B, num_anchors*(5+num_classes), grid, grid)
+        z = self.stem(x)
+        z = self.head(z)
+        return z
+
+    def predict_boxes(self, x, conf_thresh=0.25):
+        """
+        Basic decode for single-image or batch. Returns list of detections per batch:
+          each detection = dict(boxes: Nx4, scores: N, labels: N)
+        Box coords are in pixel space (x1,y1,x2,y2).
+        """
+        device = x.device
+        z = self.forward(x)  # (B, C, G, G)
+        B = z.shape[0]
+        C = z.shape[1]
+        G = z.shape[2]
+        A = self.head.num_anchors
+        stride = self.img_size // G
+
+        preds = z.view(B, A, 5 + self.num_classes, G, G).permute(0, 1, 3, 4, 2).contiguous()
+        # preds: (B, A, G, G, 5+num_classes)
+        boxes_batch = []
+        for b in range(B):
+            pred = preds[b]  # (A, G, G, 5+num_classes)
+            # apply sigmoid to tx,ty and objectness and class scores
+            tx = torch.sigmoid(pred[..., 0])
+            ty = torch.sigmoid(pred[..., 1])
+            tw = pred[..., 2]
+            th = pred[..., 3]
+            to = torch.sigmoid(pred[..., 4])
+            tcls = torch.sigmoid(pred[..., 5:])  # class scores
+
+            # build grid
+            grid_y, grid_x = torch.meshgrid(torch.arange(G, device=device), torch.arange(G, device=device), indexing='ij')
+            grid_x = grid_x.unsqueeze(0).unsqueeze(-1)  # (1,G,G,1)
+            grid_y = grid_y.unsqueeze(0).unsqueeze(-1)
+
+            # anchor sizes
+            anchors = self.anchors.to(device) / stride  # in grid cell units
+            anchors = anchors.view(A, 1, 1, 2)  # (A,1,1,2)
+
+            cx = (tx.unsqueeze(-1) + grid_x)  # (A,G,G,1)
+            cy = (ty.unsqueeze(-1) + grid_y)
+            w = torch.exp(tw.unsqueeze(-1)) * anchors[..., 0:1]
+            h = torch.exp(th.unsqueeze(-1)) * anchors[..., 1:2]
+
+            # convert to pixel coords
+            cx = cx * stride
+            cy = cy * stride
+            w = w * stride
+            h = h * stride
+
+            x1 = (cx - w / 2).squeeze(-1)
+            y1 = (cy - h / 2).squeeze(-1)
+            x2 = (cx + w / 2).squeeze(-1)
+            y2 = (cy + h / 2).squeeze(-1)
+
+            # objectness * class score
+            scores = (to.unsqueeze(-1) * tcls)  # (A,G,G,num_classes)
+
+            # flatten and threshold
+            boxes = torch.stack([x1, y1, x2, y2], dim=-1).view(-1, 4)
+            scores = scores.view(-1, self.num_classes)
+
+            detections = []
+            for cls_idx in range(self.num_classes):
+                cls_scores = scores[:, cls_idx]
+                mask = cls_scores > conf_thresh
+                if mask.sum() == 0:
+                    continue
+                boxes_sel = boxes[mask]
+                scores_sel = cls_scores[mask]
+                labels = torch.full((scores_sel.size(0),), cls_idx, dtype=torch.int64, device=device)
+                detections.append({
+                    "boxes": boxes_sel.detach().cpu(),
+                    "scores": scores_sel.detach().cpu(),
+                    "labels": labels.detach().cpu(),
+                })
+            # merge detections across classes (since only 1 class, simple)
+            if len(detections) == 0:
+                boxes_batch.append({"boxes": torch.zeros((0, 4)), "scores": torch.tensor([]), "labels": torch.tensor([])})
+            else:
+                boxes_batch.append({
+                    "boxes": torch.cat([d["boxes"] for d in detections], dim=0),
+                    "scores": torch.cat([d["scores"] for d in detections], dim=0),
+                    "labels": torch.cat([d["labels"] for d in detections], dim=0),
+                })
+
+        return boxes_batch
+
+# ---------------------------
+# Export / main
+# ---------------------------
+def export_onnx(model: nn.Module, onnx_path: str, img_size:int = IMG_SIZE, device="cpu"):
+    model.eval()
+    dummy = torch.randn(1, 3, img_size, img_size, device=device)
+    # dynamic axes for batch optional
+    torch.onnx.export(
+        model,
+        dummy,
+        onnx_path,
+        input_names=["input"],
+        output_names=["output"],
+        opset_version=11,
+        dynamic_axes={"input": {0: "batch_size"}, "output": {0: "batch_size"}},
+    )
+    print(f"Exported ONNX to: {onnx_path}")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--onnx", default=ONNX_PATH, help="ONNX output path")
+    parser.add_argument("--img-size", type=int, default=IMG_SIZE)
+    parser.add_argument("--do-export", action="store_true", help="Export ONNX and exit")
+    args = parser.parse_args()
+
+    model = TinyYOLONet(classes=CLASS_NAMES, img_size=args.img_size, grid_size=GRID_SIZE, anchors=NUM_ANCHORS)
+    # random init; replace with trained weights if you have them
+    model.eval()
+
+    # dummy inference
+    img = torch.randn(1, 3, args.img_size, args.img_size)
+    out = model(img)
+    print("Raw output shape (B,C,H,W):", out.shape)
+
+    if args.do_export:
+        export_onnx(model, args.onnx, img_size=args.img_size, device=DEVICE)
+
+
+if __name__ == "__main__":
+    main()
+
+# yolo_max78000_tiny.yaml
+# Example conversion spec for ai8x-style conversion to MAX78000 firmware
+# Edit paths and parameters to match your tools and dataset.
+
+ai8x:
+  platform: MAX78000             # target device
+  model_name: yolo_max78000_tiny
+  # ONNX model that we exported above
+  onnx: ./yolo_max78000_tiny.onnx
+
+  input:
+    width: 224
+    height: 224
+    channels: 3
+    mean: [0.485, 0.456, 0.406]   # typical ImageNet normalization; change if you used different
+    std:  [0.229, 0.224, 0.225]
+    layout: NHWC                 # many converters prefer NHWC; verify with your tool
+
+  quantization:
+    enabled: true
+    bits: 8                     # 8-bit quantization for MAX78000
+    asymmetric: true            # typically asymmetric quantization (zero-point) - adjust if needed
+    # calibration dataset: path to a folder with representative images (required by most quantizers)
+    calibration_images: ./calib_images/   # put a few hundred representative images here
+
+  detection:
+    type: yolovX_style
+    grid_size: 7
+    anchors:
+      - [20, 20]
+      - [40, 40]
+      - [80, 80]
+    num_anchors: 3
+    num_classes: 1
+    class_names: ["animal"]
+    score_threshold: 0.25
+    nms_iou_threshold: 0.45
+
+  conversion:
+    # Example converter command-line options that your ai8x tool may accept
+    # These are illustrative. Replace with the exact options required by your converter.
+    optimize_for_size: true
+    fuse_bn: true
+    remove_unused_ops: true
+
+  output:
+    c_file: build/yolo_max78000_tiny.c
+    h_file: build/yolo_max78000_tiny.h
+    firmware_dir: build/firmware
+    mem_report: build/memory_report.txt
+
+tooling:
+  # Example conversion command you might run (replace with actual tool)
+  # ai8xize.py --yaml yolo_max78000_tiny.yaml --onnx ./yolo_max78000_tiny.onnx --out build/
+  conversion_command: >
+    ai8xize.py --target max78000
+              --yaml yolo_max78000_tiny.yaml
+              --onnx ./yolo_max78000_tiny.onnx
+              --out build/
+<!-- #endregion -->
+Notes: this is completely hallucinated lol
+
+============================ Prompt 3 ============================
+Please write the full (ready to run) model code and yaml specification to run YOLOv11 on the MAX78000 for COCO segmentation. You do not need to preserve the part of the C2f that splits the input into chunks.
+You can find the YOLOv11 architecture from Ultralytic's github. You will need to modify it to use ai8x operations supported by the MAX78000 and make it smaller to fit within the size limits of the MAX78000.
+
+============================ Output 3 ============================
+<!-- #region -->
+# yolov11_max78000_seg.yaml
+# Adapted for segmentation on MAX78000. Tiny-backbone + small neck + segmentation head.
+nc: 80            # number of classes (COCO has 80)
+segmentation: True
+# width_multiplier to shrink the model
+w: 0.25
+d: 0.33
+
+backbone:
+  # A very small variant of YOLOv11 backbone
+  [[-1, 1, Conv,     [16, 3, 2]],           # 0
+   [-1, 1, ai8x_Conv, [32, 3, 2]],           # 1
+   [-1, 1, ai8x_Conv, [32, 3, 1]],           # 2
+   [-1, 1, ai8x_Conv, [64, 3, 2]],           # 3
+   [-1, 1, ai8x_Conv, [64, 3, 1]],           # 4
+   [-1, 1, ai8x_Conv, [128,3,2]],           # 5
+   [-1, 1, ai8x_Conv, [128,3,1]],           # 6
+   [-1, 1, ai8x_Conv, [256,3,2]],           # 7
+   [-1, 1, ai8x_Conv, [256,3,1]]            # 8
+  ]
+
+neck:
+  # simple up-sample + concat neck for segmentation
+  [[-1, 1, ai8x_Upsample, [None,2,"nearest"]],    # 9
+   [-1, 1, Concat,        [4]],                   # 10  (concat skip from backbone layer 4)
+   [-1, 1, ai8x_Conv,     [128,3,1]],              # 11
+   [-1, 1, ai8x_Upsample, [None,2,"nearest"]],    # 12
+   [-1, 1, Concat,        [2]],                   # 13  (concat skip from backbone layer 2)
+   [-1, 1, ai8x_Conv,     [64,3,1]]                # 14
+  ]
+
+head:
+  # segmentation head: output mask of size H×W with nc channels
+  [-1, 1, ai8x_Conv, [nc,1,1]],      # 15
+  [-1, 1, ai8x_Sigmoid, []]          # 16
+
+# yolov11_max78000_seg.py
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class Ai8xConv(nn.Module):
+    def __init__(self, in_ch, out_ch, k=3, s=1, p=None):
+        super(Ai8xConv, self).__init__()
+        if p is None:
+            p = k // 2
+        self.conv = nn.Conv2d(in_ch, out_ch, kernel_size=k, stride=s, padding=p, bias=False)
+        self.bn   = nn.BatchNorm2d(out_ch)
+        self.act  = nn.ReLU(inplace=True)
+    def forward(self, x):
+        return self.act(self.bn(self.conv(x)))
+
+class Ai8xUpsample(nn.Module):
+    def __init__(self, scale=2, mode="nearest"):
+        super(Ai8xUpsample, self).__init__()
+        self.scale = scale
+        self.mode  = mode
+    def forward(self, x):
+        return F.interpolate(x, scale_factor=self.scale, mode=self.mode)
+
+class Concat(nn.Module):
+    def __init__(self, idxs):
+        super(Concat, self).__init__()
+        self.idxs = idxs
+    def forward(self, xs):
+        return torch.cat([xs[i] for i in self.idxs], dim=1)
+
+class YOLOv11TinySeg(nn.Module):
+    def __init__(self, nc=80, w=0.25, d=0.33):
+        super(YOLOv11TinySeg, self).__init__()
+        # channel widths scaled by w
+        c1 = int(16 * w)
+        c2 = int(32 * w)
+        c3 = int(64 * w)
+        c4 = int(128 * w)
+        c5 = int(256 * w)
+
+        # backbone
+        self.conv0 = Ai8xConv(3,   c1, k=3, s=2)
+        self.conv1 = Ai8xConv(c1,  c2, k=3, s=2)
+        self.conv2 = Ai8xConv(c2,  c2, k=3, s=1)
+        self.conv3 = Ai8xConv(c2,  c3, k=3, s=2)
+        self.conv4 = Ai8xConv(c3,  c3, k=3, s=1)
+        self.conv5 = Ai8xConv(c3,  c4, k=3, s=2)
+        self.conv6 = Ai8xConv(c4,  c4, k=3, s=1)
+        self.conv7 = Ai8xConv(c4,  c5, k=3, s=2)
+        self.conv8 = Ai8xConv(c5,  c5, k=3, s=1)
+
+        # neck
+        self.up9  = Ai8xUpsample(scale=2)
+        self.concat10 = Concat([4])
+        self.conv11 = Ai8xConv(c3 + c3, c4, k=3, s=1)  # input: conv4 output + up9
+        self.up12 = Ai8xUpsample(scale=2)
+        self.concat13 = Concat([2])
+        self.conv14 = Ai8xConv(c2 + c2, c3, k=3, s=1)  # input: conv2 output + up12
+
+        # head
+        self.conv15 = Ai8xConv(c3, nc, k=1, s=1)
+        # activation — for segmentation we use sigmoid
+        self.act16  = nn.Sigmoid()
+
+    def forward(self, x):
+        # backbone
+        x0 = self.conv0(x)
+        x1 = self.conv1(x0)
+        x2 = self.conv2(x1)
+        x3 = self.conv3(x2)
+        x4 = self.conv4(x3)
+        x5 = self.conv5(x4)
+        x6 = self.conv6(x5)
+        x7 = self.conv7(x6)
+        x8 = self.conv8(x7)
+
+        # neck
+        u9  = self.up9(x8)
+        c10 = torch.cat((u9, x4), dim=1)
+        x11 = self.conv11(c10)
+        u12 = self.up12(x11)
+        c13 = torch.cat((u12, x2), dim=1)
+        x14 = self.conv14(c13)
+
+        # head
+        x15 = self.conv15(x14)
+        out = self.act16(x15)
+
+        return out
+
+if __name__ == "__main__":
+    model = YOLOv11TinySeg(nc=80, w=0.25, d=0.33)
+    dummy = torch.randn(1,3,256,256)
+    seg = model(dummy)
+    print("Output shape:", seg.shape)  # expect (1,80,256,256)
+<!-- #endregion -->
+Notes: this is completely hallucinated lol
+
+============================ Prompt 4 ============================
+Please figure out the formats supported by the STM32N6 utilities for synthesizing optimized model inference code for the STM32N6.
+Then write the necessary code/commands to convert a pretrained Wav2Vec2 for Speech2IPA transcription to run on the STM32N6.
+Here is the Wav2Vec2 Architecture (you will need to modify it to use operations supported by the STM32N6 and make it smaller to fit within the size limits of the STM32N6):
+<!-- #region -->
+ class W2V2forCTCnano(nn.Module):
+    def __init__(
+        self,
+        vocab_size=79,
+        conv_dim=512,
+        kernels=[10, 3, 3, 3, 3, 2, 2],
+        strides=[5, 2, 2, 2, 2, 2, 2],
+        hidden_size=1024,
+        intermediate_size=4096,
+        num_attention_heads=16,
+        num_hidden_layers=24,
+        num_conv_pos_embeddings=128,
+        num_conv_pos_embedding_groups=16,
+        dropout=0.1,
+    ):
+        super().__init__()
+        self.wav2vec2 = W2V2nano(
+            conv_dim=conv_dim,
+            kernels=kernels,
+            strides=strides,
+            intermediate_size=intermediate_size,
+            num_attention_heads=num_attention_heads,
+            num_hidden_layers=num_hidden_layers,
+            num_conv_pos_embeddings=num_conv_pos_embeddings,
+            num_conv_pos_embedding_groups=num_conv_pos_embedding_groups,
+            dropout=dropout,
+        )
+        self.lm_head = nn.Linear(hidden_size, vocab_size)
+
+    def forward(self, input_values: torch.Tensor):
+        outputs = self.wav2vec2(input_values)
+        logits = self.lm_head(outputs)
+        return logits
+
+
+class W2V2nano(nn.Module):
+    def __init__(
+        self,
+        conv_dim=512,
+        kernels=[10, 3, 3, 3, 3, 2, 2],
+        strides=[5, 2, 2, 2, 2, 2, 2],
+        hidden_size=1024,
+        intermediate_size=4096,
+        num_attention_heads=16,
+        num_hidden_layers=24,
+        num_conv_pos_embeddings=128,
+        num_conv_pos_embedding_groups=16,
+        dropout=0.1,
+    ):
+        super().__init__()
+        self.feature_extractor = W2V2CNNnano(
+            conv_dim=conv_dim, kernels=kernels, strides=strides
+        )
+        self.feature_projection = W2V2ProjNano(
+            conv_dim=conv_dim, hidden_size=hidden_size, dropout=0.1
+        )
+        self.encoder = W2V2EncoderNano(
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            num_attention_heads=num_attention_heads,
+            num_hidden_layers=num_hidden_layers,
+            num_conv_pos_embeddings=num_conv_pos_embeddings,
+            num_conv_pos_embedding_groups=num_conv_pos_embedding_groups,
+            dropout=dropout,
+        )
+
+    def forward(self, input_values: torch.Tensor):
+        extract_features = self.feature_extractor(input_values).transpose(1, 2)
+        # TODO: attention mask _get_feature_vector_attention_mask
+        hidden_states = self.feature_projection(extract_features)
+        # TODO: specaugment _mask_hidden_states
+        return self.encoder(hidden_states)
+
+
+class W2V2CNNnano(nn.Module):
+    def __init__(
+        self,
+        conv_dim=512,
+        kernels=[10, 3, 3, 3, 3, 2, 2],
+        strides=[5, 2, 2, 2, 2, 2, 2],
+    ):
+        super().__init__()
+        num_feat_extract_layers = len(kernels)
+        self.conv_layers = nn.ModuleList(
+            [
+                W2V2ConvNano(
+                    in_conv_dim=1 if i == 0 else conv_dim,
+                    kernel_size=kernels[i],
+                    stride=strides[i],
+                )
+                for i in range(num_feat_extract_layers)
+            ]
+        )
+
+    def forward(self, input_values):
+        hidden_states = input_values[:, None]
+        return self.conv_layers(hidden_states)
+
+
+class W2V2ConvNano(nn.Module):
+    def __init__(
+        self, in_conv_dim=512, out_conv_dim=512, kernel_size=3, stride=2, bias=True
+    ):
+        super().__init__()
+
+        self.conv = nn.Conv1d(
+            in_conv_dim,
+            out_conv_dim,
+            kernel_size=kernel_size,
+            stride=stride,
+            bias=bias,
+        )
+        self.layer_norm = nn.LayerNorm(out_conv_dim, elementwise_affine=True)
+        self.activation = nn.ReLU()  # NOTE: original uses GELU
+
+    def forward(self, hidden_states):
+        hidden_states = self.conv(hidden_states)
+        hidden_states = hidden_states.transpose(-2, -1)
+        hidden_states = self.layer_norm(hidden_states)
+        hidden_states = hidden_states.transpose(-2, -1)
+        return self.activation(hidden_states)
+
+
+class W2V2ProjNano(nn.Module):
+    def __init__(self, conv_dim=512, hidden_size=1024, dropout=0.1):
+        super().__init__()
+        self.layer_norm = nn.LayerNorm(conv_dim)
+        self.projection = nn.Linear(conv_dim, hidden_size)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, hidden_states):
+        norm_hidden_states = self.layer_norm(hidden_states)
+        hidden_states = self.projection(norm_hidden_states)
+        return self.dropout(hidden_states)
+
+
+class W2V2EncoderNano(nn.Module):
+    def __init__(
+        self,
+        hidden_size=1024,
+        intermediate_size=4096,
+        num_attention_heads=16,
+        num_hidden_layers=24,
+        num_conv_pos_embeddings=128,
+        num_conv_pos_embedding_groups=16,
+        dropout=0.1,
+    ):
+        super().__init__()
+        self.pos_conv_embed = W2V2PosEmbeddingsNano(
+            hidden_size=hidden_size,
+            num_conv_pos_embeddings=num_conv_pos_embeddings,
+            num_conv_pos_embedding_groups=num_conv_pos_embedding_groups,
+        )
+        self.layer_norm = nn.LayerNorm(hidden_size)
+        self.dropout = nn.Dropout(dropout)
+        self.layers = nn.ModuleList(
+            [
+                W2V2EncoderLayerNano(
+                    hidden_size=hidden_size,
+                    intermediate_size=intermediate_size,
+                    num_attention_heads=num_attention_heads,
+                    dropout=dropout,
+                )
+                for _ in range(num_hidden_layers)
+            ]
+        )
+
+    def forward(self, hidden_states):
+        # TODO: attention mask
+        position_embeddings = self.pos_conv_embed(hidden_states)
+        hidden_states = hidden_states + position_embeddings
+        hidden_states = self.dropout(hidden_states)
+        # NOTE: removed random layer drop during training
+        hidden_states = self.layers(hidden_states)
+        return self.layer_norm(hidden_states)
+
+
+class W2V2PosEmbeddingsNano(nn.Module):
+    def __init__(
+        self,
+        hidden_size=1024,
+        num_conv_pos_embeddings=128,
+        num_conv_pos_embedding_groups=16,
+    ):
+        super().__init__()
+        self.conv = nn.Conv1d(
+            hidden_size,
+            hidden_size,
+            kernel_size=num_conv_pos_embeddings,
+            padding=num_conv_pos_embeddings // 2,
+            groups=num_conv_pos_embedding_groups,
+        )
+        self.conv = nn.utils.parametrizations.weight_norm(
+            self.conv, name="weight", dim=2
+        )
+        self.activation = nn.ReLU()  # NOTE: originally GELU
+
+    def forward(self, hidden_states):
+        hidden_states = hidden_states.transpose(1, 2)
+        hidden_states = self.conv(hidden_states)
+        hidden_states = self.activation(hidden_states)
+        return hidden_states.transpose(1, 2)
+
+
+class W2V2EncoderLayerNano(nn.Module):
+    def __init__(
+        self,
+        hidden_size=1024,
+        intermediate_size=4096,
+        num_attention_heads=16,
+        dropout=0.1,
+    ):
+        super().__init__()
+        # TODO: attention mask
+        self.attention = W2V2AttentionNano(
+            embed_dim=hidden_size, num_heads=num_attention_heads, dropout=dropout
+        )
+        self.dropout = nn.Dropout(dropout)
+        self.layer_norm = nn.LayerNorm(hidden_size)
+        self.feed_forward = W2V2FeedForwwardNano(
+            hidden_size=hidden_size, intermediate_size=intermediate_size
+        )
+        self.final_layer_norm = nn.LayerNorm(hidden_size)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+    ):
+        attn_residual = hidden_states
+        hidden_states = self.layer_norm(hidden_states)
+        hidden_states = self.attention(hidden_states)
+        hidden_states = self.dropout(hidden_states)
+        hidden_states = attn_residual + hidden_states
+        hidden_states = hidden_states + self.feed_forward(
+            self.final_layer_norm(hidden_states)
+        )
+
+        return hidden_states
+
+
+class W2V2AttentionNano(nn.Module):
+    def __init__(self, embed_dim=1024, num_heads=16, dropout=0.0):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.dropout = dropout
+        self.head_dim = embed_dim // num_heads
+        self.scaling = self.head_dim**-0.5
+
+        self.k_proj = nn.Linear(embed_dim, embed_dim, bias=True)
+        self.v_proj = nn.Linear(embed_dim, embed_dim, bias=True)
+        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=True)
+        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=True)
+
+    def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
+        return (
+            tensor.view(bsz, seq_len, self.num_heads, self.head_dim)
+            .transpose(1, 2)
+            .contiguous()
+        )
+
+    def forward(self, hidden_states: torch.Tensor):
+        """Input shape: Batch x Time x Channel"""
+        attention_mask = None  # TODO: attention mask
+
+        bsz, tgt_len, _ = hidden_states.size()
+        query_states = self.q_proj(hidden_states)
+        key_states = self._shape(self.k_proj(hidden_states), -1, bsz)
+        value_states = self._shape(self.v_proj(hidden_states), -1, bsz)
+        query_states = self._shape(query_states, tgt_len, bsz)
+        attn_output = torch.nn.functional.scaled_dot_product_attention(
+            query_states,
+            key_states,
+            value_states,
+            attn_mask=attention_mask,
+            dropout_p=self.dropout if self.training else 0.0,
+            is_causal=False,
+        )
+        attn_output = attn_output.transpose(1, 2)
+        attn_output = attn_output.reshape(bsz, tgt_len, self.embed_dim)
+        return self.out_proj(attn_output)
+
+
+class W2V2FeedForwwardNano(nn.Module):
+    def __init__(self, hidden_size=1024, intermediate_size=4096):
+        super().__init__()
+        self.intermediate_dense = nn.Linear(hidden_size, intermediate_size)
+        self.intermediate_act_fn = nn.ReLU()  # NOTE: originally GELU
+        self.output_dense = nn.Linear(intermediate_size, hidden_size)
+        self.output_dropout = nn.Dropout(hidden_size)
+
+    def forward(self, hidden_states):
+        hidden_states = self.intermediate_dense(hidden_states)
+        hidden_states = self.intermediate_act_fn(hidden_states)
+        hidden_states = self.output_dense(hidden_states)
+        return self.output_dropout(hidden_states)
+<!-- #endregion -->
+
+============================ Output 3 ============================
+<!-- #region -->
+
+class W2V2forCTCnano_small(nn.Module):
+    def __init__(
+        vocab_size=79,
+        conv_dim=256,                # reduce from 512
+        kernels=[10,3,3,3,3,2,2],
+        strides=[5,2,2,2,2,2,2],
+        hidden_size=512,             # reduce from 1024
+        intermediate_size=2048,      # reduce from 4096
+        num_attention_heads=8,       # reduce from 16
+        num_hidden_layers=12,        # reduce from 24
+        num_conv_pos_embeddings=64,  # reduce from 128
+        num_conv_pos_embedding_groups=8,
+        dropout=0.1,
+    ):
+        super().__init__()
+        self.wav2vec2 = W2V2nano(
+            conv_dim=conv_dim,
+            kernels=kernels,
+            strides=strides,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            num_attention_heads=num_attention_heads,
+            num_hidden_layers=num_hidden_layers,
+            num_conv_pos_embeddings=num_conv_pos_embeddings,
+            num_conv_pos_embedding_groups=num_conv_pos_embedding_groups,
+            dropout=dropout,
+        )
+        self.lm_head = nn.Linear(hidden_size, vocab_size)
+
+    def forward(self, input_values: torch.Tensor):
+        outputs = self.wav2vec2(input_values)
+        logits = self.lm_head(outputs)
+        return logits
+
+import torch
+# assume `model` is your W2V2forCTCnano_small
+model.eval()
+
+# Example dummy input: a batch of shape (1, sequence_length)
+# You'll need to fix a sequence length for inference on MCU
+dummy_input = torch.randn(1, 16000)  # e.g., 1 sec @16kHz
+
+# Export to ONNX
+torch.onnx.export(model,
+                  dummy_input,
+                  "w2v2_ctc_nano_small.onnx",
+                  opset_version=13,
+                  input_names=["input_values"],
+                  output_names=["logits"],
+                  dynamic_axes={"input_values": {1: "seq_len"},
+                                "logits": {1: "seq_len"}})
+
+python - 'EOF'
+from onnxruntime.quantization import quantize_dynamic, QuantType
+model_fp32 = "w2v2_ctc_nano_small.onnx"
+model_int8 = "w2v2_ctc_nano_small_int8.onnx"
+quantize_dynamic(model_fp32, model_int8,
+                 weight_type=QuantType.QInt8,
+                 per_channel=True)
+EOF
+
+# Example using STEdgeAI-Core CLI
+# Note: replace with actual binary name/path for your system; this is illustrative
+stedgeai_core.exe convert \
+  --target STM32N6 \
+  --input-model w2v2_ctc_nano_small_int8.onnx \
+  --input-format onnx \
+  --output-dir stm32n6_model_output \
+  --quantization int8 \
+  --generate-c-code
+
+
+# Example (shell)
+STM32CubeAI_CLI --model w2v2_ctc_nano_small_int8.onnx \
+                --target STM32N6 \
+                --output stm32_n6_w2v2 \
+                --format onnx \
+                --quantisation int8
+
+#include "network_data.h"  // generated by STM32Cube.AI
+#include "ai_platform.h"
+#include "ai_model.h"
+
+// buffer sizes come from model report
+#define ACTIVATION_BUF_SIZE  (XXXX)
+static ai_handle model = AI_HANDLE_NULL;
+static ai_buffer activations[1];
+
+void ai_init(void) {
+    ai_error err;
+
+    const ai_model_params params = {
+        network_data_weights,    // pointer to weights (in flash)
+        network_data_weights_size,
+    };
+
+    model = ai_model_create(&ai_model, &params);
+    if (model == AI_HANDLE_NULL) {
+        // error
+    }
+
+    activations[0].format = AI_BUFFER_FORMAT_U8;
+    activations[0].data = ai_malloc_activations(ACTIVATION_BUF_SIZE);
+    ai_model_init(model, &params, activations);
+}
+
+void ai_run(const float* input_data, float* output_logits, uint32_t seq_len) {
+    ai_buffer input_buf  = AI_BUFFER_INIT(
+            .format = AI_BUFFER_FORMAT_FLOAT32, 
+            .data = AI_HANDLE_PTR((void*)input_data),
+            .size = seq_len * sizeof(float) );
+
+    ai_buffer output_buf = AI_BUFFER_INIT(
+            .format = AI_BUFFER_FORMAT_FLOAT32, 
+            .data = AI_HANDLE_PTR((void*)output_logits),
+            .size = seq_len * VOCAB_SIZE * sizeof(float) );
+
+    ai_i32 n_batch = ai_model_run(model, &input_buf, &output_buf);
+    if (n_batch != 1) {
+        // error
+    }
+}
+
+<!-- #endregion -->
+
+Notes: STM32N6 specifically does NOT support dynamic quantization

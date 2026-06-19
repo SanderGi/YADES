@@ -1,0 +1,339 @@
+---
+# Manually edited YAML template for YOLOv8pico trained on elk detection for the MAX78000
+
+arch: yolo_pico
+dataset: elk_detection
+
+layers:
+  # Layer 0
+  - name: cv1.conv_Conv_8  # cv1.conv_Conv_8 fused with cv1.conv.activate
+    # input shape: (3, 180, 180)
+    data_format: CHW
+    processors: 0x0000000100010001
+    out_offset: 0x4000
+    op: Conv2d
+    kernel_size: 3x3
+    pad: 1
+    activate: Relu
+    streaming: true
+    # output shape: (16, 180, 180)
+
+  # Layer 1
+  - name: cv2.conv_Conv_6  # cv1.pool and cv2.conv_Conv_6 fused with cv2.conv.activate
+    # input shape: (16, 180, 180)
+    # dimensions (32400 pixels) may require streaming or folding
+    processors: 0xffff000000000000
+    out_offset: 0x0000
+    op: Conv2d
+    kernel_size: 3x3
+    pad: 1
+    activate: Relu
+    max_pool: 2
+    pool_stride: 2
+    pool_dilation: [1, 1]
+    streaming: true
+    # output shape: (32, 90, 90)
+
+  # Layer 2
+  - name: cv3.cv1_Conv_6  # cv2.pool and cv3.cv1_Conv_6 fused with cv3.cv1.activate
+    # input shape: (32, 90, 90)
+    processors: 0x00000ff0fff0fff0
+    out_offset: 0x4000
+    op: Conv2d
+    kernel_size: 1x1
+    pad: 0
+    activate: Relu
+    max_pool: 2
+    pool_stride: 2
+    pool_dilation: [1, 1]
+    # output shape: (16, 45, 45)
+
+  # Layer 3
+  - name: gap_cv3.cv1_Conv_6
+    # input shape: (16, 45, 45)
+    processors: 0x00000000ffff0000
+    out_offset: 0x0004
+    op: Passthrough
+    write_gap: 1
+    # output shape: (16, 45, 45)
+
+  # Layer 4
+  - name: cv3.bottleneck.cv1_Conv_6  # cv3.bottleneck.cv1_Conv_6 fused with cv3.bottleneck.cv1.activate
+    # input shape: (16, 45, 45)
+    in_sequences: [cv3.cv1_Conv_6]
+    processors: 0x00000000ffff0000
+    in_offset: 0x4000
+    out_offset: 0x0000
+    op: Conv2d
+    kernel_size: 3x3
+    pad: 1
+    activate: Relu
+    # output shape: (16, 45, 45)
+
+  # Layer 5
+  - name: cv3.bottleneck.cv2_Conv_6  # cv3.bottleneck.cv2_Conv_6 fused with cv3.bottleneck.cv2.activate
+    # input shape: (16, 45, 45)
+    processors: 0xffff000000000000
+    out_offset: 0x0000
+    op: Conv2d
+    kernel_size: 3x3
+    pad: 1
+    activate: Relu
+    write_gap: 1
+    # output shape: (16, 45, 45)
+
+  # Layer 6
+  - name: cv3.cv2_Conv_6  # cv3.bottleneck.add and cv3.cv2_Conv_6 fused with cv3.cv2.activate
+    # input shape: (16, 45, 45), (16, 45, 45)
+    in_sequences: [cv3.bottleneck.cv2_Conv_6, gap_cv3.cv1_Conv_6]
+    processors: 0x00000000ffff0000
+    out_offset: 0x4000
+    op: Conv2d
+    eltwise: Add
+    operands: 2
+    kernel_size: 1x1
+    pad: 0
+    activate: Relu
+    # output shape: (32, 45, 45)
+
+  # Layer 7
+  - name: cv4.conv_Conv_6  # cv4.conv_Conv_6 fused with cv4.conv.activate
+    # input shape: (32, 45, 45)
+    processors: 0xffffffff00000000
+    out_offset: 0x0000
+    op: Conv2d
+    kernel_size: 3x3
+    pad: 1
+    activate: Relu
+    # output shape: (32, 45, 45)
+
+  # Layer 8
+  - name: cv5.cv1_Conv_6  # cv4.pool and cv5.cv1_Conv_6 fused with cv5.cv1.activate
+    # input shape: (32, 45, 45)
+    processors: 0xffffffff00000000
+    out_offset: 0x4000
+    op: Conv2d
+    kernel_size: 1x1
+    pad: 0
+    activate: Relu
+    max_pool: 2
+    pool_stride: 2
+    pool_dilation: [1, 1]
+    # output shape: (16, 22, 22)
+
+  # Layer 9
+  - name: gap_cv5.cv1_Conv_6
+    # input shape: (16, 22, 22)
+    processors: 0x000000000000ffff
+    out_offset: 0x0004
+    op: Passthrough
+    write_gap: 1
+    # output shape: (16, 22, 22)
+
+  # Layer 10
+  - name: cv5.bottleneck.cv1_Conv_6  # cv5.bottleneck.cv1_Conv_6 fused with cv5.bottleneck.cv1.activate
+    # input shape: (16, 22, 22)
+    in_sequences: [cv5.cv1_Conv_6]
+    processors: 0x000000000000ffff
+    in_offset: 0x4000
+    out_offset: 0x0000
+    op: Conv2d
+    kernel_size: 3x3
+    pad: 1
+    activate: Relu
+    # output shape: (16, 22, 22)
+
+  # Layer 11
+  - name: cv5.bottleneck.cv2_Conv_6  # cv5.bottleneck.cv2_Conv_6 fused with cv5.bottleneck.cv2.activate
+    # input shape: (16, 22, 22)
+    processors: 0x0000ffff00000000
+    out_offset: 0x0000
+    op: Conv2d
+    kernel_size: 3x3
+    pad: 1
+    activate: Relu
+    write_gap: 1
+    # output shape: (16, 22, 22)
+
+  # Layer 12
+  - name: cv5.cv2_Conv_6  # cv5.bottleneck.add and cv5.cv2_Conv_6 fused with cv5.cv2.activate
+    # input shape: (16, 22, 22), (16, 22, 22)
+    in_sequences: [cv5.bottleneck.cv2_Conv_6, gap_cv5.cv1_Conv_6]
+    processors: 0x000000000000ffff
+    out_offset: 0x4000
+    op: Conv2d
+    eltwise: Add
+    operands: 2
+    kernel_size: 1x1
+    pad: 0
+    activate: Relu
+    # output shape: (32, 22, 22)
+
+  # Layer 13
+  - name: cv6.conv_Conv_6  # cv6.conv_Conv_6 fused with cv6.conv.activate
+    # input shape: (32, 22, 22)
+    processors: 0x000000ffffffff00
+    out_offset: 0x0000
+    op: Conv2d
+    kernel_size: 3x3
+    pad: 1
+    activate: Relu
+    # output shape: (64, 22, 22)
+
+  # Layer 14
+  - name: cv7.cv1_Conv_6  # cv6.pool and cv7.cv1_Conv_6 fused with cv7.cv1.activate
+    # input shape: (64, 22, 22)
+    processors: 0xffffffffffffffff
+    out_offset: 0x4000
+    op: Conv2d
+    kernel_size: 1x1
+    pad: 0
+    activate: Relu
+    max_pool: 2
+    pool_stride: 2
+    pool_dilation: [1, 1]
+    # output shape: (32, 11, 11)
+
+  # Layer 15
+  - name: gap_cv7.cv1_Conv_6
+    # input shape: (32, 11, 11)
+    processors: 0xffffffff00000000
+    out_offset: 0x0004
+    op: Passthrough
+    write_gap: 1
+    output_processors: 0xffffffff00000000
+    # output shape: (32, 11, 11)
+
+  # Layer 16
+  - name: cv7.bottleneck.cv1_Conv_6  # cv7.bottleneck.cv1_Conv_6 fused with cv7.bottleneck.cv1.activate
+    # input shape: (32, 11, 11)
+    in_sequences: [cv7.cv1_Conv_6]
+    processors: 0xffffffff00000000
+    in_offset: 0x4000
+    out_offset: 0x0000
+    op: Conv2d
+    kernel_size: 3x3
+    pad: 1
+    activate: Relu
+    # output shape: (32, 11, 11)
+
+  # Layer 17
+  - name: cv7.bottleneck.cv2_Conv_6  # cv7.bottleneck.cv2_Conv_6 fused with cv7.bottleneck.cv2.activate
+    # input shape: (32, 11, 11)
+    processors: 0x00000000ffffffff
+    out_offset: 0x0000
+    op: Conv2d
+    kernel_size: 3x3
+    pad: 1
+    activate: Relu
+    write_gap: 1
+    # output shape: (32, 11, 11)
+
+  # Layer 18
+  - name: cv7.cv2_Conv_6  # cv7.bottleneck.add and cv7.cv2_Conv_6 fused with cv7.cv2.activate
+    # input shape: (32, 11, 11), (32, 11, 11)
+    in_sequences: [cv7.bottleneck.cv2_Conv_6, gap_cv7.cv1_Conv_6]
+    processors: 0xffffffff00000000
+    out_offset: 0x4000
+    op: Conv2d
+    eltwise: Add
+    operands: 2
+    kernel_size: 1x1
+    pad: 0
+    activate: Relu
+    # output shape: (64, 11, 11)
+
+  # Layer 19
+  - name: cv8.conv_Conv_6  # cv8.conv_Conv_6 fused with cv8.conv.activate
+    # input shape: (64, 11, 11)
+    processors: 0xffffffffffffffff
+    out_offset: 0x0000
+    op: Conv2d
+    kernel_size: 3x3
+    pad: 1
+    activate: Relu
+    # output shape: (128, 11, 11)
+
+  # Layer 20
+  - name: cv9.cv1_Conv_6  # cv8.pool and cv9.cv1_Conv_6 fused with cv9.cv1.activate
+    # input shape: (128, 11, 11)
+    processors: 0xffffffffffffffff
+    out_offset: 0x4000
+    op: Conv2d
+    kernel_size: 1x1
+    pad: 0
+    activate: Relu
+    max_pool: 2
+    pool_stride: 2
+    pool_dilation: [1, 1]
+    # output shape: (64, 5, 5)
+
+  # Layer 21
+  - name: gap_cv9.cv1_Conv_6
+    # input shape: (64, 5, 5)
+    processors: 0xffffffffffffffff
+    out_offset: 0x0004
+    op: Passthrough
+    write_gap: 1
+    # output shape: (64, 5, 5)
+
+  # Layer 22
+  - name: cv9.bottleneck.cv1_Conv_6  # cv9.bottleneck.cv1_Conv_6 fused with cv9.bottleneck.cv1.activate
+    # input shape: (64, 5, 5)
+    in_sequences: [cv9.cv1_Conv_6]
+    processors: 0xffffffffffffffff
+    in_offset: 0x4000
+    out_offset: 0x2000
+    op: Conv2d
+    kernel_size: 3x3
+    pad: 1
+    activate: Relu
+    # output shape: (64, 5, 5)
+
+  # Layer 23
+  - name: cv9.bottleneck.cv2_Conv_6  # cv9.bottleneck.cv2_Conv_6 fused with cv9.bottleneck.cv2.activate
+    # input shape: (64, 5, 5)
+    processors: 0xffffffffffffffff
+    out_offset: 0x0000
+    op: Conv2d
+    kernel_size: 3x3
+    pad: 1
+    activate: Relu
+    write_gap: 1
+    # output shape: (64, 5, 5)
+
+  # Layer 24
+  - name: cv9.cv2_Conv_6  # cv9.bottleneck.add and cv9.cv2_Conv_6 fused with cv9.cv2.activate
+    # input shape: (64, 5, 5), (64, 5, 5)
+    in_sequences: [cv9.bottleneck.cv2_Conv_6, gap_cv9.cv1_Conv_6]
+    processors: 0xffffffffffffffff
+    out_offset: 0x4000
+    op: Conv2d
+    eltwise: Add
+    operands: 2
+    kernel_size: 1x1
+    pad: 0
+    activate: Relu
+    # output shape: (128, 5, 5)
+
+  # Layer 25
+  - name: classify.conv_Conv_6  # classify.conv_Conv_6 fused with classify.conv.activate
+    # input shape: (128, 5, 5)
+    processors: 0xffffffffffffffff
+    out_offset: 0x0000
+    op: Conv2d
+    kernel_size: 1x1
+    pad: 0
+    activate: Relu
+    # output shape: (512, 5, 5)
+
+  # Layer 26
+  - name: classify.linear_Gemm_4  # classify.pool.pool fused with classify.linear_Gemm_4
+    # input shape: (512, 5, 5)
+    processors: 0xffffffffffffffff
+    out_offset: 0x4000
+    op: Linear
+    activate: None
+    avg_pool: 5
+    pool_stride: 5
+    # output shape: (2,)

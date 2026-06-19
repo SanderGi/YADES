@@ -1,0 +1,27 @@
+# Extreme example showing about as many channels as you can have in the first few layers with streaming
+# Uses 387,214 of 442,000 available weight memory bytes (87.7%) 
+
+# Model Parameters
+num_input_channels: 3
+input_width: 180
+input_height: 180
+num_output_classes: 2
+
+# Layer Definitions
+# format: output_channels kernel_size padding [pool_size pool_stride]
+4 3 1
+8 3 1 2 2
+8 3 1 2 2
+16 3 1 2 2
+# we now no longer have enough processors to keep streaming (used 4 + 8 + 8 + 16 = 36 out of 64 and need some left for the following layer)
+16 3 1 2 2
+64 3 1 2 2
+# the next two layers will use multi-pass
+128 3 1
+128 3 1
+# we now no longer have enough memory for more high channel layers
+64 3 1 
+64 3 1
+64 3 1
+8 3 1 2 2
+4 3 1

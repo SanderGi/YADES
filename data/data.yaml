@@ -1,0 +1,9 @@
+path: ../.data/animal  # dataset root path
+train: train  # train images (relative to 'path')
+val: val  # val images (relative to 'path')
+test: test # test images (relative to 'path')
+
+# Classes
+names:
+  0: animal
+  1: non-animal

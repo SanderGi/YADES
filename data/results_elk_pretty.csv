@@ -1,0 +1,22 @@
+model,method,note,test_elk_accuracy,test_other_accuracy,test_accuracy,pytorch_size_kb,onnx_size_kb,size_kb
+CNN Small,Baseline CNN,,0.904,0.923,0.9135,414.387,,414.387
+CNN Medium,Baseline CNN,,0.963,0.961,0.962,2193.991,,2193.991
+CNN YOLOv8n-sized,Baseline CNN,,0.983,0.964,0.9735,5568.327,,5568.327
+YOLOv8n-CLS Fine-tuned,Baseline YOLOv8n,,0.997,0.999,0.998,,5773.222,5773.222
+YOLO Static Quantized UINT4,Quant Static,4bit,0,1,0.5,,834.365,834.365
+YOLO Static Quantized UINT8,Quant Static,8bit,1,0.545,0.7725,1600.689,1551.385,1551.385
+YOLO Static Quantized UINT16,Quant Static,16bit,0.997,0.997,0.997,2985.467,,2985.467
+YOLO Dynamic Quantized UINT4,Quant Dynamic,4bit,0.45,0.98,0.715,791.477,,791.477
+YOLO Dynamic Quantized UINT8,Quant Dynamic,8bit,0.987,0.994,0.9905,,1508.509,1508.509
+YOLOv8n-CLS Fine-tuned Float16,Quant Dynamic,16bit,0.997,0.999,0.998,2963.08,,2963.08
+YOLO 60% pruned,Pruning,40%,0.534,0.764,0.649,2901.277,,2901.277
+YOLO 70% pruned,Pruning,50%,0.147,0.968,0.5575,2784.023,,2784.023
+YOLO 80% pruned,Pruning,60%,0.005,0.999,0.502,2103.859,,2103.859
+YOLO 90% pruned,Pruning,80%,0.022,0.996,0.509,928.301,,928.301
+YOLO QAT,QAT+Pruning,0%,0.999,0.996,0.9975,1586.191,,1586.191
+YOLO QAT Pruned 30%,QAT+Pruning,30%,0.999,0.986,0.9925,832.886,,832.886
+YOLO QAT Pruned 50%,QAT+Pruning,50%,0.965,0.996,0.9805,628.119,,628.119
+YOLO QAT Pruned 70%,QAT+Pruning,70%,0.978,0.974,0.976,412.114,,412.114
+YOLO QAT Pruned 90%,QAT+Pruning,90%,0.998,0.189,0.5935,188.085,,188.085
+YOLO Pico Distilled Tiny,QAT+Distill,,0.983,0.967,0.975,296.88,,296.88
+MobileNetV2,Baseline MobileNetV2,,,,0.9825,,,4384.64
